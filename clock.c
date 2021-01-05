@@ -89,13 +89,29 @@
 #include <curl/curl.h>
 #include "ws2811.h"
 
+#define STR(s) #s
+#define XSTR(s) STR(s)
+
 // defaults for cmdline options
 #define TARGET_FREQ             WS2811_TARGET_FREQ
-#define GPIO_PIN                18
+#define LED_GPIO_PIN            18
 #define DMA                     10
 #define STRIP_TYPE              WS2811_STRIP_GBR		// WS2812/SK6812RGB integrated chip+leds
-
 #define LED_COUNT               6
+
+/* Pin exits. Mathing the electrical schematics. */
+#define U2_1 14 // GPIO11
+#define U2_2 12 // GPIO10
+#define U2_3 13 // GPIO9
+#define U2_6 10 // GPIO8
+
+#define U4_3 11 // GPIO7
+#define U4_4 22 // GPIO6
+
+#define U3_3 21 // GPIO5
+#define U3_4 7  // GPIO4
+#define U3_6 9  // GPIO3
+#define U3_7 8  // GPIO2
 
 /* Thermometer readings for inside and outside temperature. */
 struct thermometers {
@@ -225,7 +241,7 @@ void matrix_bottom(ws2811_t *ledstring)
 {
     	int i;
 
-	// Different kinds of read and orange.
+	// Different kinds of red and orange dot colors.
 	ws2811_led_t dotcolors[] =
 	{
     	    0x00000004,
@@ -248,27 +264,31 @@ void matrix_bottom(ws2811_t *ledstring)
 // Show given digit on the idicator.
 static void show_digit(int d)
 {
-	static int translate[] = { 3, 4, 5, 13, 12, 8, 9, 1, 0, 2 /*14*/ };
+	// k155id1 output pin does not match to the digits we display,
+	// so we need to use translation tatble to map digits to
+	// the right output pin.
+	static int translate[] = { 3, 4, 5, 13, 12, 8, 9, 1, 0, 2 };
         d = translate[d];
-	digitalWrite(21, d&1 ? HIGH: LOW);
-	digitalWrite(7, d&2 ? HIGH: LOW);
-	digitalWrite(9, d&4 ? HIGH: LOW);
-	digitalWrite(8, d&8 ? HIGH: LOW);
+
+	digitalWrite(U3_3, d&1 ? HIGH: LOW);
+	digitalWrite(U3_4, d&2 ? HIGH: LOW);
+	digitalWrite(U3_6, d&4 ? HIGH: LOW);
+	digitalWrite(U3_7, d&8 ? HIGH: LOW);
 }
 
 // Set dots on the indicator.
 static void show_dots(int d)
 {
-	digitalWrite(11, d&1 ? HIGH: LOW);
-	digitalWrite(22, d&2 ? HIGH: LOW);
+	digitalWrite(U4_3, d&1 ? HIGH: LOW);
+	digitalWrite(U4_4, d&2 ? HIGH: LOW);
 }
 
 // Set digit position
 static void set_digit(int d)
 {
-	digitalWrite(14, d&1 ? HIGH: LOW);
-	digitalWrite(12, d&2 ? HIGH: LOW);
-	digitalWrite(13, d&4 ? HIGH: LOW);
+	digitalWrite(U2_1, d&1 ? HIGH: LOW);
+	digitalWrite(U2_2, d&2 ? HIGH: LOW);
+	digitalWrite(U2_3, d&4 ? HIGH: LOW);
 }
 
 // Show digit on the given indicator position.
@@ -278,9 +298,9 @@ static void display_pos(int pos, int d)
         show_digit(d);
 
 	// Turn on indicator power for 3ms to display the digit
-	digitalWrite(10, HIGH);
+	digitalWrite(U2_6, HIGH);
         usleep(3000);
-	digitalWrite(10, LOW);
+	digitalWrite(U2_6, LOW);
 	// Wait to let the power supply reset.
         usleep(100);
 }
@@ -289,15 +309,15 @@ static void display_pos(int pos, int d)
 static void run_all_digits()
 {
 	int i, j;
-        digitalWrite(10, HIGH);
+        digitalWrite(U2_6, HIGH);
 	for (i=0; i<10; i++) {
             show_digit(i);
 	    for (j=1; j<=6; j++) {
 	        set_digit(j);
-                usleep(3000);
+                usleep(5000);
 	    }
 	}
-	digitalWrite(10, LOW);
+	digitalWrite(U2_6, LOW);
 }
 
 // Display current time
@@ -316,20 +336,23 @@ static void display_bars(struct timeval *tv)
 {
 	if (tv->tv_usec < 500000) {
 	    set_digit(0);
-       	    digitalWrite(10, HIGH);
+       	    digitalWrite(U2_6, HIGH);
             usleep(3000);
 	} else {
 	    set_digit(7);
-            digitalWrite(10, HIGH);
+            digitalWrite(U2_6, HIGH);
             usleep(3000);
 	}
-       	digitalWrite(10, LOW);
+       	digitalWrite(U2_6, LOW);
 }
 
 // Display the running dots
 static void display_dots(struct timeval *tv)
 {
-	int light = 0;
+	int light = 0; // Display a dot flag.
+
+	// Every 7 seconds we run the dots first right to left
+	// and than next second left to right.
 	if (tv->tv_sec % 7 == 0) {
 	    // Run the dosts right to left
 	    // First find the dot number.
@@ -348,6 +371,7 @@ static void display_dots(struct timeval *tv)
 		light = 1;
 	    }
 	} else if (tv->tv_sec%7 == 1) {
+	    // Run the dosts left to right
 	    int d = tv->tv_usec/80000;
 	    if (d<12) {
 	        set_digit(d/2+1);
@@ -361,12 +385,12 @@ static void display_dots(struct timeval *tv)
 	}
 
 	if (light) {
-	    digitalWrite(7, HIGH);
-	    digitalWrite(9, HIGH);
+	    digitalWrite(U3_4, HIGH);
+	    digitalWrite(U3_6, HIGH);
 	    // Ligh the dot.
-            digitalWrite(10, HIGH);
+            digitalWrite(U2_6, HIGH);
             usleep(3000);
-            digitalWrite(10, LOW);
+            digitalWrite(U2_6, LOW);
 	    // Reset the dot.
 	    show_dots(1);
 	}
@@ -411,13 +435,14 @@ static void update_outside_temperature(struct thermometers *temp)
     	struct curl_slist *headers = NULL;                      /* http headers to send with request */
 
     	/* url to the weather map */
-        char *url = "http://api.openweathermap.org/data/2.5/weather?q=Helsinki,fi&APPID=fa1e15c8e21e5c84e74ef29c46047632";
+        char *url = "http://api.openweathermap.org/data/2.5/weather?q=Helsinki,fi&APPID=" XSTR(OWM_KEY);
 
     	/* init curl handle */
     	if ((ch = curl_easy_init()) == NULL) {
             /* log error */
             fprintf(stderr, "ERROR: Failed to create curl handle in fetch_session");
             /* return error */
+	    return;
         }
 
         /* set content type */
@@ -447,19 +472,19 @@ static void update_outside_temperature(struct thermometers *temp)
         }
 
         /* check payload */
-        if (cf->payload != NULL) {
-            /* parse return */
-            json = json_tokener_parse_verbose(cf->payload, &jerr);
-            /* free payload */
-            free(cf->payload);
-        } else {
+        if (cf->payload == NULL) {
             /* error */
             fprintf(stderr, "ERROR: Failed to populate payload");
             /* free payload */
             free(cf->payload);
             /* return */
             return;
-        }
+	}
+
+        /* parse return */
+        json = json_tokener_parse_verbose(cf->payload, &jerr);
+        /* free payload */
+        free(cf->payload);
 
         /* check error */
         if (jerr != json_tokener_success) {
@@ -525,7 +550,7 @@ int main()
     	{
             [0] =
         	{
-                .gpionum = GPIO_PIN,
+                .gpionum = LED_GPIO_PIN,
                 .count = LED_COUNT,
                 .invert = 0,
                 .brightness = 255,
@@ -552,18 +577,18 @@ int main()
     // Initialize output pins.
     wiringPiSetup();
 
-    pinMode(10, OUTPUT); // GPIO8
-    pinMode(12, OUTPUT); // GPIO10
-    pinMode(13, OUTPUT); // GPIO9
-    pinMode(14, OUTPUT); // GPIO11
+    pinMode(U2_1, OUTPUT); // GPIO11
+    pinMode(U2_2, OUTPUT); // GPIO10
+    pinMode(U2_3, OUTPUT); // GPIO9
+    pinMode(U2_6, OUTPUT); // GPIO8
 
-    pinMode(11, OUTPUT); // GPIO7
-    pinMode(22, OUTPUT); // GPIO6
+    pinMode(U4_3, OUTPUT); // GPIO7
+    pinMode(U4_4, OUTPUT); // GPIO6
 
-    pinMode(21, OUTPUT); // GPIO5
-    pinMode(7, OUTPUT);  // GPIO4
-    pinMode(9, OUTPUT);  // GPIO3
-    pinMode(8, OUTPUT);  // GPIO2
+    pinMode(U3_3, OUTPUT); // GPIO5
+    pinMode(U3_4, OUTPUT); // GPIO4
+    pinMode(U3_6, OUTPUT);  // GPIO3
+    pinMode(U3_7, OUTPUT);  // GPIO2
 
     // Run all the digits on startup
     for (i=0; i<10; i++) {
@@ -611,6 +636,5 @@ int main()
 
     ws2811_fini(&ledstring);
 
-    printf ("\n");
     return ret;
 }
