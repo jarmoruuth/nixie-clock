@@ -73,6 +73,7 @@
 #include <stdarg.h>
 #include <getopt.h>
 #include <time.h>
+#include <pthread.h>
 
 #include "clk.h"
 #include "gpio.h"
@@ -92,14 +93,14 @@
 #define STR(s) #s
 #define XSTR(s) STR(s)
 
-// defaults for cmdline options
+// defaults for led string options
 #define TARGET_FREQ             WS2811_TARGET_FREQ
 #define LED_GPIO_PIN            18
 #define DMA                     10
 #define STRIP_TYPE              WS2811_STRIP_GBR		// WS2812/SK6812RGB integrated chip+leds
 #define LED_COUNT               6
 
-/* Pin exits. Mathing the electrical schematics. */
+/* Pin exits. Matching the electrical schematics. */
 #define U2_1 14 // GPIO11
 #define U2_2 12 // GPIO10
 #define U2_3 13 // GPIO9
@@ -115,8 +116,10 @@
 
 /* Thermometer readings for inside and outside temperature. */
 struct thermometers {
-	int inside;
-	int outside;
+	int inside;   // Inside temperature (read from ds18b20).
+	int outside;  // Outside temperature (read from openweathermap).
+	pthread_cond_t timer_cond;  // Reader stop message.
+	pthread_mutex_t timer_lock; // Thermometers lock.
 };
 
 /* holder for curl fetch */
@@ -237,7 +240,7 @@ static void matrix_clear(ws2811_t *ledstring)
 }
 
 // Set leads to random colors.
-void matrix_bottom(ws2811_t *ledstring)
+static void display_leds(ws2811_t *ledstring)
 {
     	int i;
 
@@ -261,11 +264,11 @@ void matrix_bottom(ws2811_t *ledstring)
         }
 }
 
-// Show given digit on the idicator.
+// Show given digit on the indicator.
 static void show_digit(int d)
 {
 	// k155id1 output pin does not match to the digits we display,
-	// so we need to use translation tatble to map digits to
+	// so we need to use translation table to map digits to
 	// the right output pin.
 	static int translate[] = { 3, 4, 5, 13, 12, 8, 9, 1, 0, 2 };
         d = translate[d];
@@ -299,10 +302,10 @@ static void display_pos(int pos, int d)
 
 	// Turn on indicator power for 3ms to display the digit
 	digitalWrite(U2_6, HIGH);
-        usleep(3000);
+        usleep(2000);
 	digitalWrite(U2_6, LOW);
 	// Wait to let the power supply reset.
-        usleep(100);
+        usleep(50);
 }
 
 // Run all the indicator digits.
@@ -396,18 +399,6 @@ static void display_dots(struct timeval *tv)
 	}
 }
 
-// Display the leds.
-static void display_leds(ws2811_t *ledstring)
-{
-    	ws2811_return_t ret;
-        matrix_bottom(ledstring);
-
-        if ((ret = ws2811_render(ledstring)) != WS2811_SUCCESS)
-        {
-            fprintf(stderr, "ws2811_render failed: %s\n", ws2811_get_return_t_str(ret));
-        }
-}
-
 // Read ds18b20 sensor and update inside temperature
 static void update_inside_temperature(struct thermometers *temp)
 {
@@ -422,7 +413,7 @@ static void update_inside_temperature(struct thermometers *temp)
 }
 
 // Read the outside temperature from Openweathermap
-static void update_outside_temperature(struct thermometers *temp)
+void update_outside_temperature(struct thermometers *temp)
 {
     	CURL *ch;                                               /* curl handle */
     	CURLcode rcode;                                         /* curl result code */
@@ -513,34 +504,81 @@ static void update_outside_temperature(struct thermometers *temp)
         json_object_put(json);
 }
 
-// Read the themometer 
-static void get_thermometers(struct thermometers *temp)
+// Read the thermometer data.
+// We use a dedicated thread to read the thermometers in order not
+// to interfere with the main thread running display updates.
+static void *thermometer_reader_thr(void *p)
 {
-	update_inside_temperature(temp);
-	update_outside_temperature(temp);
+	struct thermometers *temp = p;
+
+	pthread_mutex_lock(&temp->timer_lock);
+
+	while (1) {
+	    struct timespec cond_timer;
+	    int rc;
+
+            // Read the thermometers
+	    update_inside_temperature(temp);
+	    update_outside_temperature(temp);
+
+	    // Get Current time + 1 hour to the cond_timer.
+	    clock_gettime(CLOCK_REALTIME, &cond_timer);
+	    cond_timer.tv_sec += 60*60;
+
+	    // Wait for the stop signal for 1 hour, and then update the 
+	    // readings again.
+	    rc = pthread_cond_timedwait(&temp->timer_cond, &temp->timer_lock, &cond_timer);
+	    if (rc == 0) {
+		// Stop signal received.
+                break;
+	    }
+	}
+
+	pthread_mutex_unlock(&temp->timer_lock);
+
+	return NULL;
 }
 
-// Display the temperature
-static void display_thermometers(struct thermometers *temp)
+// Display the temperature (in Celcius degrees).
+static void display_thermometers(struct thermometers *temp, ws2811_t *ledstring)
 {
+	int negative_outside = 0;
+	int i;
+
 	// First two indicators show the inside temperature
         display_pos(1, temp->inside/10);
         display_pos(2, temp->inside%10);
 
-	// Indicators 5 and 6 show the outside temerature
+	// Indicators 5 and 6 show the outside temperature
 	int outside = temp->outside;
 	if (outside < 0) {
+	    negative_outside = 1;
 	    outside = - outside;
 	}
         display_pos(5, outside/10);
         display_pos(6, outside%10);
+
+        for (i = 0; i < LED_COUNT; i++) {
+            ledstring->channel[0].leds[i] = 0;
+        }
+
+	if (negative_outside) {
+	    // blue backlight indicates negative temperature.
+            ledstring->channel[0].leds[0] = 0x100000;
+            ledstring->channel[0].leds[1] = 0x100000;
+	} else {
+	    // red backlight indicates positive temperature.
+            ledstring->channel[0].leds[0] = 0x0010;
+            ledstring->channel[0].leds[1] = 0x0010;
+	}
 }
 
 int main()
 {
     ws2811_return_t ret;
     int i;
-    struct thermometers temp = {0, 0};
+    struct thermometers temp;
+    pthread_t thread_id;
 
     ws2811_t ledstring =
     {
@@ -565,6 +603,12 @@ int main()
             },
         },
     };
+
+    // Initialize thermometers.
+    temp.inside = 0;
+    temp.outside = 0;
+    pthread_cond_init(&temp.timer_cond, NULL);
+    pthread_mutex_init(&temp.timer_lock, NULL);
 
     setup_handlers();
 
@@ -596,38 +640,62 @@ int main()
     }
     set_digit(0);
 
-    // Read the termometers at startup.
-    get_thermometers(&temp);
+    // Read the thermometers in dedicated thread.
+    if (pthread_create(&thread_id, NULL, thermometer_reader_thr, &temp)) {
+        fprintf(stderr, "Thermometer thread start failed.\n");
+    }
 
     for (i=0; running; i++) {
 	struct tm *tm;
 	struct timeval tv;
+	int update_leds = 0;
 
 	// Read the current time
 	gettimeofday(&tv, NULL);
 	tm = localtime(&tv.tv_sec);
 
 	if (tm->tm_min%5 == 1 && tm->tm_sec==tm->tm_min) {
-	    // Every 5 minutes run all the digits on all idicators for 1 second.
+	    // Every 5 minutes run all the digits on all indicators for 1 second.
             run_all_digits();
-	} else if (tm->tm_min == 1 && tm->tm_sec==2) {
-            // Every hour read the termometers
-	    get_thermometers(&temp);
-	} else if (tm->tm_min%3==1 && tm->tm_sec>tm->tm_min && tm->tm_sec<=tm->tm_min+3) {
-            // Every 5 minutes display the temometer readings.
-	    display_thermometers(&temp);
+	} else if (tm->tm_min%3==1 && tm->tm_sec>tm->tm_min && tm->tm_sec<=tm->tm_min+3 &&
+	           pthread_mutex_trylock(&temp.timer_lock) == 0)
+	{
+            // Every 5 minutes display the thermometer readings.
+	    // In case the thermometer thread is running right now and has the readings
+	    // locked we just skip showing the temperature this time.
+	    display_thermometers(&temp, &ledstring);
+	    update_leds = 1;
+	    pthread_mutex_unlock(&temp.timer_lock);
         } else {
-	    // By defalt show current time.
+	    // By default show current time.
             display_time(tm);
-	    display_bars(&tv);
+
+	    if (i%3 == 0) {
+		// We light the bars once per 3 iterations
+		// to dime them a bit.
+	    	display_bars(&tv);
+	    }
 	    display_dots(&tv);
+
+            if (i%4==0) {
+                // Update led backlight. We update the backlight every 4 iterations
+		// in order not to make them change colors too often.
+                display_leds(&ledstring);
+		update_leds = 1;
+	    }
 	}
 
-        if (i%4==0) {
-            // Update led backlight.
-            display_leds(&ledstring);
-	}
+	if (update_leds) {
+            if ((ret = ws2811_render(&ledstring)) != WS2811_SUCCESS) {
+                fprintf(stderr, "ws2811_render failed: %s\n", ws2811_get_return_t_str(ret));
+	    }
+        }
     }
+
+    // Send a stop signal to the thermometer reading thread 
+    pthread_cond_signal(&temp.timer_cond);
+    // Wait for the thermometer reader thread to exit.
+    pthread_join(thread_id, NULL);
 
     if (clear_on_exit) {
 	matrix_clear(&ledstring);
