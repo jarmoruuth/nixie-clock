@@ -1,0 +1,3 @@
+[all]
+#Temperature sensor
+dtoverlay=w1-gpio,gpiopin=12,pullup=0
