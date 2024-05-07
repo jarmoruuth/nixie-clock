@@ -2,6 +2,8 @@
 
 Clock is built to drive 6 IN+14 nixie tubes display. It shows the time, room temperature and outdoor temperature.
 
+![clock text](https://github.com/alexander-krotov/nixie-clock/blob/main/Nixie_clock.jpg?raw=true)
+
 # Hardware
 Clock prototype is based on a Raspberry Pi board (yes, I know it is overkill, later version is built on ESP32).
 
