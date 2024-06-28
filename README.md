@@ -50,7 +50,7 @@ References to hardware:
 
 The clock program source code is clock.c. Written in C, it requires libjson-c, libcurl, libws2811, and should be run as root to have permissions to access to GPIOs.
 
-Clock displays the current system time, that could be with NTP, for example. The inside temperature is read from the hardware digital thermometer. The outside temperature
+Clock displays the current system time, that could be set with NTP, for example. The inside temperature is read from the hardware digital thermometer. The outside temperature
 is read from openweathermap.org (you will need to get your own key and set OWM_KEY to use the service). libjson-c and libcurl are needed to get the outside temperature.
 
 libws2811 is used to control 6 WS2812 leds.
