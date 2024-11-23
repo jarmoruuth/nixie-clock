@@ -349,6 +349,24 @@ static void display_bars(struct timeval *tv)
        	digitalWrite(U2_6, LOW);
 }
 
+static void display_bars_every_other_sec(struct timeval *tv)
+{
+        if (tv->tv_sec % 2 == 0) {
+                set_digit(0);
+                digitalWrite(U2_6, HIGH);
+                usleep(2000);
+
+                set_digit(7);
+                digitalWrite(U2_6, HIGH);
+                usleep(2000);
+
+                digitalWrite(U2_6, LOW);
+
+                // Wait to let the power supply reset.
+                usleep(50);
+        }
+}
+
 // Display the running dots
 static void display_dots(struct timeval *tv)
 {
@@ -579,6 +597,9 @@ int main()
     int i;
     struct thermometers temp;
     pthread_t thread_id;
+    int show_temp = 0;
+    int show_running_dots = 0;
+    int blinking_bars = 0;
 
     ws2811_t ledstring =
     {
@@ -604,12 +625,13 @@ int main()
         },
     };
 
-    // Initialize thermometers.
-    temp.inside = 0;
-    temp.outside = 0;
-    pthread_cond_init(&temp.timer_cond, NULL);
-    pthread_mutex_init(&temp.timer_lock, NULL);
-
+    if (show_temp) {
+        // Initialize thermometers.
+        temp.inside = 0;
+        temp.outside = 0;
+        pthread_cond_init(&temp.timer_cond, NULL);
+        pthread_mutex_init(&temp.timer_lock, NULL);
+    }
     setup_handlers();
 
     // Initialize led backligh
@@ -640,11 +662,12 @@ int main()
     }
     set_digit(0);
 
-    // Read the thermometers in dedicated thread.
-    if (pthread_create(&thread_id, NULL, thermometer_reader_thr, &temp)) {
-        fprintf(stderr, "Thermometer thread start failed.\n");
+    if (show_temp) {
+        // Read the thermometers in dedicated thread.
+        if (pthread_create(&thread_id, NULL, thermometer_reader_thr, &temp)) {
+                fprintf(stderr, "Thermometer thread start failed.\n");
+        }
     }
-
     for (i=0; running; i++) {
 	struct tm *tm;
 	struct timeval tv;
@@ -657,7 +680,7 @@ int main()
 	if (tm->tm_min%5 == 1 && tm->tm_sec==tm->tm_min) {
 	    // Every 5 minutes run all the digits on all indicators for 1 second.
             run_all_digits();
-	} else if (tm->tm_min%3==1 && tm->tm_sec>tm->tm_min && tm->tm_sec<=tm->tm_min+3 &&
+	} else if (show_temp && tm->tm_min%3==1 && tm->tm_sec>tm->tm_min && tm->tm_sec<=tm->tm_min+3 &&
 	           pthread_mutex_trylock(&temp.timer_lock) == 0)
 	{
             // Every 5 minutes display the thermometer readings.
@@ -670,12 +693,18 @@ int main()
 	    // By default show current time.
             display_time(tm);
 
-	    if (i%3 == 0) {
-		// We light the bars once per 3 iterations
-		// to dime them a bit.
-	    	display_bars(&tv);
-	    }
-	    display_dots(&tv);
+            if (blinking_bars) {
+                if (i%3 == 0) {
+                        // We light the bars once per 3 iterations
+                        // to dime them a bit.
+                        display_bars(&tv);
+                }
+            } else {
+                display_bars_every_other_sec(&tv);
+            }
+            if (show_running_dots) {
+	        display_dots(&tv);
+            }
 
             if (i%4==0) {
                 // Update led backlight. We update the backlight every 4 iterations
@@ -692,11 +721,12 @@ int main()
         }
     }
 
-    // Send a stop signal to the thermometer reading thread 
-    pthread_cond_signal(&temp.timer_cond);
-    // Wait for the thermometer reader thread to exit.
-    pthread_join(thread_id, NULL);
-
+    if (show_temp) {
+        // Send a stop signal to the thermometer reading thread 
+        pthread_cond_signal(&temp.timer_cond);
+        // Wait for the thermometer reader thread to exit.
+        pthread_join(thread_id, NULL);
+    }
     if (clear_on_exit) {
 	matrix_clear(&ledstring);
 	ws2811_render(&ledstring);
